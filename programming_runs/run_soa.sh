@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+# Wrapper to run the SOA main with sensible defaults; forwards any extra args
 python main.py \
   --run_name "soa" \
   --root_dir "human-eval-results" \
@@ -8,5 +10,6 @@ python main.py \
   --pass_at_k "1" \
   --max_iters "5" \
   --max_depth "2" \
-  --verbose
+  --verbose \
+  "$@"
 

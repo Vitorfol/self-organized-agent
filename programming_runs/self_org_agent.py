@@ -3,6 +3,7 @@ from utils import enumerate_resume, make_printv, write_jsonl, resume_success_cou
 from generators import generator_factory, model_factory
 from typing import List
 import soas
+import os
 
 
 def run_soa(
@@ -59,6 +60,26 @@ def run_soa(
         item["is_solved"] = is_solved
         item["test_feedback"] = test_feedback
         item["solution"] = cur_func_impl
+        # write the solution to a separate file for easier inspection
+        try:
+            solutions_dir = os.path.join(os.path.dirname(log_path), "solutions")
+            if not os.path.exists(solutions_dir):
+                os.makedirs(solutions_dir)
+            # safe filename: use item name or entry_point
+            base_name = item.get("name") or item.get("entry_point") or "solution"
+            safe_base = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in base_name)
+            entry = item.get("entry_point") or "impl"
+            filename = f"{safe_base}_{entry}.py"
+            filepath = os.path.join(solutions_dir, filename)
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write("# Generated solution from SOA run\n")
+                f.write(cur_func_impl if cur_func_impl is not None else "# No solution generated\n")
+        except Exception as e:
+            # don't crash the run if saving fails; just print a warning
+            try:
+                print(f"Warning: could not write solution file: {e}")
+            except Exception:
+                pass
         write_jsonl(log_path, [item], append=True)
         print_v(
             f'completed {i+1}/{num_items}: acc = {round(num_success/(i+1), 2)}')
