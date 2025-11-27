@@ -2,8 +2,10 @@ from utils import enumerate_resume, make_printv, write_jsonl, resume_success_cou
 #from executors import executor_factory
 from generators import generator_factory, model_factory
 from typing import List
+import time
 import soas
 import os
+import concurrent.futures
 
 
 def run_soa(
@@ -17,6 +19,8 @@ def run_soa(
     max_depth: int,
     is_leetcode: bool = False,
     model_params: dict = None,
+    timeout: int = 0,
+    max_turns: int = 1,
 ) -> None:
     #exe = executor_factory(language, is_leet=is_leetcode)
     gen = generator_factory(language)
@@ -38,24 +42,89 @@ def run_soa(
 
     num_items = len(dataset)
     num_success = resume_success_count(dataset)
+    # overall timeout handling
+    start_time = time.time()
+    deadline = None
+    try:
+        t = int(timeout)
+        if t and t > 0:
+            deadline = start_time + t
+    except Exception:
+        deadline = None
 
     for i, item in enumerate_resume(dataset, log_path):
-        # Simplified flow: only generate code and save it. Skip generating or
-        # executing tests to avoid loops during the testing phase.
+        # check overall timeout before starting the next item
+        if deadline is not None and time.time() >= deadline:
+            print_v(f"timeout reached before item {i+1}/{num_items}; stopping run")
+            break
+
+        # Simplified flow with controlled turns: generate up to `max_turns`
+        # attempts per item, or stop earlier if we get a non-empty implementation.
         test_feedback = []
 
         docstrings = item["prompt"]
         function_name = item["entry_point"]
-        # Call the SOA generator once; don't run iterative modification or tests.
-        result = soas.generate_and_modify_code_with_soa(function_name, docstrings, [], max_depth, 1, model_name, model_kwargs=model_kwargs)
-        # support old return (string) and new return (dict)
-        if isinstance(result, dict):
-            impl = result.get("implementation") or ""
-            raw = result.get("raw_skeleton") or ""
-            # prefer implementation but fall back to raw skeleton
-            cur_func_impl = impl if impl and impl.strip() else raw
-        else:
-            cur_func_impl = result
+
+        cur_func_impl = None
+        attempts = 0
+        timed_out = False
+        while attempts < max_turns:
+            # check timeout inside the per-item loop
+            if deadline is not None and time.time() >= deadline:
+                print_v(f"timeout reached during item {i+1}/{num_items} after {attempts} attempts")
+                break
+
+            # compute remaining time (seconds) for this attempt
+            remaining = None
+            if deadline is not None:
+                remaining = max(0.0, deadline - time.time())
+
+            # Run the generation in a worker and respect the remaining time
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(
+                        soas.generate_and_modify_code_with_soa,
+                        function_name,
+                        docstrings,
+                        [],
+                        max_depth,
+                        1,
+                        model_name,
+                        model_kwargs,
+                    )
+                    # If remaining is None (no deadline) wait indefinitely, else wait up to remaining
+                    if remaining is None or remaining <= 0:
+                        result = future.result()
+                    else:
+                        result = future.result(timeout=remaining)
+            except concurrent.futures.TimeoutError:
+                print_v(f"generation timed out for item {i+1}/{num_items} after {attempts} attempts (deadline reached)")
+                timed_out = True
+                # we did not get a result for this attempt
+                result = None
+            except Exception as e:
+                # propagate other exceptions as non-fatal for the run; capture and continue
+                print_v(f"generation error for item {i+1}/{num_items}: {e}")
+                result = None
+            # support old return (string) and new return (dict)
+            if isinstance(result, dict):
+                impl = result.get("implementation") or ""
+                raw = result.get("raw_skeleton") or ""
+                # prefer implementation but fall back to raw skeleton
+                candidate_impl = impl if impl and impl.strip() else raw
+            else:
+                candidate_impl = result
+
+            if candidate_impl is not None and isinstance(candidate_impl, str) and candidate_impl.strip():
+                cur_func_impl = candidate_impl
+                break
+
+            attempts += 1
+
+        if timed_out:
+            # stop the entire run if we hit the overall deadline
+            print_v("overall deadline reached; terminating run")
+            break
 
         # When skipping tests, mark as not solved and leave test_feedback empty
         item["is_solved"] = False

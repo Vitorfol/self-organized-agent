@@ -33,6 +33,8 @@ def get_args():
                         help="Pass@k metric", default=1)
     parser.add_argument("--max_iters", type=int,
                         help="The maximum number of self-improvement iterations", default=10)
+    parser.add_argument("--max_turns", type=int,
+                        help="Maximum number of generation attempts (turns) per item", default=1)
     parser.add_argument("--max_depth", type=int,
                         help="The maximum depth of tree of self-organizing agents", default=2)
     parser.add_argument("--expansion_factor", type=int,
@@ -43,6 +45,8 @@ def get_args():
 
     parser.add_argument("--verbose", action='store_true',
                         help="To print live logs")
+    parser.add_argument("--timeout", type=int,
+                        help="Overall timeout for the run in seconds (0 = no timeout)", default=0)
     args = parser.parse_args()
     return args
 
@@ -174,6 +178,8 @@ pass@k: {args.pass_at_k}
         max_depth=args.max_depth,
         is_leetcode=False, #args.is_leetcode
         model_params=model_params,
+        timeout=args.timeout,
+        max_turns=args.max_turns,
     )
 
     print(f"Done! Check out the logs in `{log_path}`")
