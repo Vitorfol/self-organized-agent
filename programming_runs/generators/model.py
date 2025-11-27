@@ -62,17 +62,119 @@ def chat_completions(messages=None, model=None, max_tokens=None, temperature=Non
     if "content" in kwargs and payload.get("messages") is None:
         payload["messages"] = [{"role": "user", "content": kwargs.pop("content")}]
     if max_tokens is not None:
-        payload["max_tokens"] = max_tokens
+        # Newer models (e.g. GPT-5 family) expect `max_completion_tokens` instead
+        # of the legacy `max_tokens`. Detect by model name and map accordingly.
+        model_name_for_map = payload.get("model") if isinstance(payload.get("model"), str) else ""
+        if model_name_for_map and ("gpt-5" in model_name_for_map or model_name_for_map.startswith("gpt5") or model_name_for_map.startswith("gpt-5")):
+            payload["max_completion_tokens"] = max_tokens
+        else:
+            payload["max_tokens"] = max_tokens
     if temperature is not None:
         payload["temperature"] = temperature
 
     # merge any other kwargs (e.g., response_format, modalities, etc.)
     payload.update(kwargs)
 
-    # forward call to client; this keeps compatibility with newer models that may
-    # accept extra parameters
-    response = client.chat.completions.create(**payload)
-    return response
+    # Some newer models (GPT-5 family) may restrict allowed parameter values
+    model_name_for_map = payload.get("model") if isinstance(payload.get("model"), str) else ""
+    is_gpt5 = bool(model_name_for_map and ("gpt-5" in model_name_for_map or model_name_for_map.startswith("gpt5") or model_name_for_map.startswith("gpt-5")))
+
+    # Try the request; if the model rejects a parameter (e.g., temperature),
+    # attempt a conservative retry (temperature=1) for GPT-5 models.
+    try:
+        response = client.chat.completions.create(**payload)
+    except Exception as e:
+        msg = str(e)
+        # If GPT-5 rejects temperature (or similar), try forcing temperature=1
+        if is_gpt5 and ("temperature" in msg or "Unsupported value" in msg or "does not support" in msg):
+            try:
+                payload["temperature"] = 1
+                response = client.chat.completions.create(**payload)
+            except Exception:
+                # re-raise original error if retry fails
+                raise
+        else:
+            raise
+
+    # optional debug dump of the raw SDK response when requested
+    try:
+        import time
+        if os.getenv("DUMP_OPENAI_RESPONSE") == "1":
+            dump_path = os.path.join(os.getcwd(), "root", f"debug_response_{int(time.time())}.txt")
+            try:
+                with open(dump_path, "w", encoding="utf-8") as df:
+                    df.write("PAYLOAD:\n")
+                    df.write(str(payload) + "\n\n")
+                    df.write("RESPONSE_REPR:\n")
+                    df.write(repr(response))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # extract content in multiple possible response shapes
+    def _gather_text(obj):
+        out = []
+        try:
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if isinstance(v, str):
+                        out.append(v)
+                    else:
+                        out.extend(_gather_text(v))
+                return out
+            if isinstance(obj, (list, tuple)):
+                for v in obj:
+                    out.extend(_gather_text(v))
+                return out
+            if hasattr(obj, "__dict__"):
+                return _gather_text(vars(obj))
+            if hasattr(obj, "output"):
+                return _gather_text(getattr(obj, "output"))
+            if hasattr(obj, "choices"):
+                return _gather_text(getattr(obj, "choices"))
+        except Exception:
+            return out
+        if isinstance(obj, str):
+            out.append(obj)
+            return out
+        return out
+
+    texts = _gather_text(response)
+    candidate = "\n".join(t.strip() for t in texts if isinstance(t, str) and t.strip())
+    if candidate:
+        # prefer fenced python blocks; sanitize obvious SDK metadata first
+        import re
+        def _sanitize(text: str) -> str:
+            out_lines = []
+            for ln in text.splitlines():
+                s = ln.strip()
+                if not s:
+                    continue
+                if re.match(r'^(chatcmpl-|req_|gpt-5|gpt5|gpt-4|gpt4|length$|assistant$|chat\.completion$|default$)', s):
+                    continue
+                if len(s) < 80 and re.match(r'^[A-Za-z0-9_\-]{4,}$', s) and not re.search(r'[():=<>"\'"\[\]{}]', s):
+                    continue
+                out_lines.append(ln)
+            return "\n".join(out_lines)
+
+        candidate = _sanitize(candidate)
+        m = re.search(r"```python\n([\s\S]*?)```", candidate, re.IGNORECASE)
+        if m:
+            return m.group(1)
+        m2 = re.search(r"```\n([\s\S]*?)```", candidate)
+        if m2:
+            return m2.group(1)
+        # prefer returning from first `def ` onwards if found
+        m3 = re.search(r"(def\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^\)]*\):[\s\S]*)", candidate)
+        if m3:
+            return m3.group(1)
+        return candidate
+    try:
+        return str(response)
+    except Exception:
+        return ""
+
 
 def gpt_completion(
         model: str,
@@ -153,6 +255,17 @@ def gpt_chat(
         temperature=temperature,
         max_tokens=max_tokens,
     )
+
+    # chat_completions may already return an extracted string (we made the
+    # wrapper robust to different SDK shapes). If so, just return it.
+    if isinstance(response, str):
+        if num_comps == 1:
+            return response
+        else:
+            # best-effort: duplicate the single response to satisfy callers
+            return [response for _ in range(num_comps)]
+
+    # otherwise response is likely an SDK response object with choices
     if num_comps == 1:
         return response.choices[0].message.content  # type: ignore
 
@@ -187,8 +300,13 @@ class GPTChat(ModelBase):
         if hasattr(self, "model_kwargs") and isinstance(self.model_kwargs, dict):
             merged.update(self.model_kwargs)
         merged.update(model_kwargs)
-        # forward model-specific kwargs (for newer model parameters like modalities, response_format, etc.)
-        return gpt_chat(self.name, messages, max_tokens=max_tokens, temperature=temperature, num_comps=num_comps, **merged)
+        # Avoid passing duplicate keyword args: let merged override defaults
+        mk = dict(merged)  # copy
+        mk_max_tokens = mk.pop("max_tokens", max_tokens)
+        mk_temperature = mk.pop("temperature", temperature)
+        mk_num_comps = mk.pop("num_comps", num_comps)
+        # forward model-specific kwargs (remaining keys) to the chat function
+        return gpt_chat(self.name, messages, max_tokens=mk_max_tokens, temperature=mk_temperature, num_comps=mk_num_comps, **mk)
 
 
 class GPT4(GPTChat):

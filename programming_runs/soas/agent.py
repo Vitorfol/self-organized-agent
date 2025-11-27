@@ -10,21 +10,71 @@ test_generator = py_utils.MyPythonExecute("gpt-3.5-turbo-1106")
 # Helper functions (not provided in the pseudocode)
 def generate_skeleton(docstrings: str, model_name: str, model_kwargs: dict = None) -> str:
     # Generate skeleton code based on docstrings and unit tests
-    full_prompt = prompt.PROMPT_TEMPLATES["generate_skeleton"].replace("{function}", docstrings)
+    # Ask model to respond with code only to increase chance of parsable output
+    instr = "Respond ONLY with valid Python code inside a ```python``` code block. Do NOT include any explanation."
+    full_prompt = instr + "\n" + prompt.PROMPT_TEMPLATES["generate_skeleton"].replace("{function}", docstrings)
     code = api.api_chat_completions(full_prompt, model_name=model_name, **(model_kwargs or {}))
-    return py_utils.extract_python_source_code_from_text(code)
+    # try to extract python source; if parsing fails, try to extract code fences or def blocks
+    try:
+        return py_utils.extract_python_source_code_from_text(code)
+    except Exception:
+        # try to find ```python``` fenced block
+        import re
+        m = re.search(r"```python\n([\s\S]*?)```", code, re.IGNORECASE)
+        if m:
+            return py_utils.extract_python_source_code_from_text(m.group(1))
+        # try to find first def ... block
+        m2 = re.search(r"(def\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^\)]*\):[\s\S]*)", code)
+        if m2:
+            # take until two consecutive newlines or end
+            candidate = m2.group(1).split('\n\n')[0]
+            return candidate
+        # fallback: return raw code string so caller can handle it
+        return code
 
 
 def generate_code(docstrings: str, model_name: str, model_kwargs: dict = None) -> str:
     # Generate code based on docstrings and unit tests
-    full_prompt = prompt.PROMPT_TEMPLATES["generate_code"].replace("{function}", docstrings)
+    instr = "Respond ONLY with valid Python code inside a ```python``` code block. Do NOT include any explanation."
+    full_prompt = instr + "\n" + prompt.PROMPT_TEMPLATES["generate_code"].replace("{function}", docstrings)
     code = api.api_chat_completions(full_prompt, model_name=model_name, **(model_kwargs or {}))
-    return py_utils.extract_python_source_code_from_text(code)
+    try:
+        return py_utils.extract_python_source_code_from_text(code)
+    except Exception:
+        import re
+        m = re.search(r"```python\n([\s\S]*?)```", code, re.IGNORECASE)
+        if m:
+            return py_utils.extract_python_source_code_from_text(m.group(1))
+        m2 = re.search(r"(def\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^\)]*\):[\s\S]*)", code)
+        if m2:
+            candidate = m2.group(1).split('\n\n')[0]
+            return candidate
+        return code
 
 
 def get_subtasks(code: str, main_func_name: str, n_gen_tests: int) -> List[tuple]:
     # Extract subtask docstrings and unit tests from the code
-    function_names = py_utils.extract_python_function_names(code)
+    # sanitize the provided code to remove SDK metadata that some models
+    # (especially GPT-5 family) may include in the response. This prevents
+    # ast.parse from failing on lines like `gpt-5-mini-2025-08-07`.
+    import re
+    def _sanitize(text: str) -> str:
+        out_lines = []
+        for ln in text.splitlines():
+            s = ln.strip()
+            if not s:
+                continue
+            # skip obvious SDK metadata tokens/headers
+            if re.match(r'^(chatcmpl-|req_|gpt-5|gpt5|gpt-4|gpt4|length$|assistant$|chat\.completion$|default$)', s):
+                continue
+            # skip short single-token lines that look like ids/hashes
+            if len(s) < 80 and re.match(r'^[A-Za-z0-9_\-]{4,}$', s) and not re.search(r'[():=<>"\'"\[\]{}]', s):
+                continue
+            out_lines.append(ln)
+        return "\n".join(out_lines)
+
+    sanitized = _sanitize(code)
+    function_names = py_utils.extract_python_function_names(sanitized)
 
     subtasks = []
     for func_name in function_names:

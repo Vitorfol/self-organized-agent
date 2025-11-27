@@ -57,10 +57,25 @@ def enumerate_resume(dataset, results_path):
         for i, item in enumerate(dataset):
             yield i, item
     else:
+        # Count only valid JSON lines. Some runs may have stray characters or
+        # invalid lines (e.g., partial writes, debugging output). We should
+        # ignore those lines so the resume logic is robust.
         count = 0
-        with jsonlines.open(results_path) as reader:
-            for item in reader:
-                count += 1
+        try:
+            with open(results_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        # try to parse as JSON; if it fails, skip the line
+                        json.loads(line)
+                        count += 1
+                    except Exception:
+                        # ignore malformed lines
+                        continue
+        except Exception:
+            # if anything goes wrong reading, assume nothing processed
+            count = 0
 
         for i, item in enumerate(dataset):
             # skip items that have been processed before

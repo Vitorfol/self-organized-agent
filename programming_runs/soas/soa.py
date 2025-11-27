@@ -23,12 +23,38 @@ def generate(agent: Agent, depth: int, max_depth: int, model_name: str, model_kw
         agent.update_memory(code)
     else: # Mother
         skeleton = agent.generate_skeleton(agent.docstrings)
-        code = py_utils.extract_python_function_from_text(skeleton, agent.func_name)
+        # Try to extract the specific function implementation; if extraction
+        # fails (agent returned an unexpected format), fall back to using the
+        # entire python source extracted from the skeleton so the run can continue.
+        try:
+            code = py_utils.extract_python_function_from_text(skeleton, agent.func_name)
+        except Exception:
+            # fallback: try extracting source code (may contain multiple funcs)
+            try:
+                code = py_utils.extract_python_source_code_from_text(skeleton)
+            except Exception:
+                # last resort: attempt to salvage by extracting a fenced python
+                # code block or the first `def` block via simple heuristics
+                import re
+                m = re.search(r"```python\n([\s\S]*?)```", skeleton, re.IGNORECASE)
+                if m:
+                    code = m.group(1)
+                else:
+                    m2 = re.search(r"(def\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^\)]*\):[\s\S]*)", skeleton)
+                    if m2:
+                        candidate = m2.group(1).split('\n\n')[0]
+                        code = candidate
+                    else:
+                        # last resort: use the raw skeleton
+                        code = skeleton
         agent.update_memory(code)
         print("code (agent):")
         print(code)
         print()
-        for subtask_funcname, subtask_docstrings in agent.get_subtasks(skeleton):
+        # use the sanitized `code` (extracted function/source) when deriving
+        # subtasks; passing the raw `skeleton` can contain SDK metadata and
+        # break the AST-based name extraction.
+        for subtask_funcname, subtask_docstrings in agent.get_subtasks(code):
             next_agent = generate_agent(agent, subtask_funcname, subtask_docstrings, depth, max_depth, model_name, model_kwargs=model_kwargs)
             generate(next_agent, depth + 1, max_depth, model_name)
 
@@ -53,7 +79,13 @@ def modify(agent: Agent, test_result: bool, upper_agent_observation: Union[Dict,
             modify(subagent, subagent_test_result, agent_observation, depth + 1, max_depth)
 
 
-def generate_and_modify_code_with_soa(function_name: str, docstrings: str, unit_tests: List[str], max_depth: int, max_iterations: int, model_name: str, model_kwargs: dict = None) -> str:
+def generate_and_modify_code_with_soa(function_name: str, docstrings: str, unit_tests: List[str], max_depth: int, max_iterations: int, model_name: str, model_kwargs: dict = None) -> dict:
+    """Generate and iteratively modify code with SOA.
+
+    Returns a dict with:
+      - implementation: the combined implementation string (may be empty)
+      - raw_skeleton: the last root mother code/skeleton (best-effort)
+    """
     root_mother = MotherAgent(function_name, docstrings, model_name=model_name, model_kwargs=model_kwargs)
     generate(root_mother, 1, max_depth, model_name, model_kwargs=model_kwargs)
 
@@ -67,7 +99,10 @@ def generate_and_modify_code_with_soa(function_name: str, docstrings: str, unit_
         else:
             modify(root_mother, test_result, None, 1, max_depth)
 
-    return combine_implementations(root_mother)
+    combined = combine_implementations(root_mother)
+    # raw_skeleton: best-effort last known root mother code
+    raw = getattr(root_mother, "code", "") or ""
+    return {"implementation": combined, "raw_skeleton": raw}
 
 
 def evaluate(code: str, unit_tests: List[str]) -> Tuple[bool, str]:
