@@ -67,9 +67,6 @@ def get_subtasks(code: str, main_func_name: str, n_gen_tests: int) -> List[tuple
             # skip obvious SDK metadata tokens/headers
             if re.match(r'^(chatcmpl-|req_|gpt-5|gpt5|gpt-4|gpt4|length$|assistant$|chat\.completion$|default$)', s):
                 continue
-            # skip short single-token lines that look like ids/hashes
-            if len(s) < 80 and re.match(r'^[A-Za-z0-9_\-]{4,}$', s) and not re.search(r'[():=<>"\'"\[\]{}]', s):
-                continue
             out_lines.append(ln)
         return "\n".join(out_lines)
 

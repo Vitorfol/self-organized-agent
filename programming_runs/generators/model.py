@@ -85,16 +85,70 @@ def chat_completions(messages=None, model=None, max_tokens=None, temperature=Non
         response = client.chat.completions.create(**payload)
     except Exception as e:
         msg = str(e)
-        # If GPT-5 rejects temperature (or similar), try forcing temperature=1
         if is_gpt5 and ("temperature" in msg or "Unsupported value" in msg or "does not support" in msg):
             try:
                 payload["temperature"] = 1
                 response = client.chat.completions.create(**payload)
             except Exception:
-                # re-raise original error if retry fails
+                raise
+        elif is_gpt5 and ("max_tokens" in msg or "max_completion_tokens" in msg or "model output limit" in msg or "max output" in msg):
+            # attempt progressively larger caps
+            for cap in (2048, 8192, 32768):
+                try:
+                    if payload.get("model") and ("gpt-5" in payload.get("model") or str(payload.get("model")).startswith("gpt5") or str(payload.get("model")).startswith("gpt-5")):
+                        payload["max_completion_tokens"] = cap
+                    else:
+                        payload["max_tokens"] = cap
+                    response = client.chat.completions.create(**payload)
+                    break
+                except Exception:
+                    response = None
+                    continue
+            if response is None:
                 raise
         else:
             raise
+
+    # if response exists but appears truncated (finish_reason == 'length' or empty
+    # assistant content), try again with larger caps for GPT-5 family
+    try:
+        def _truncated(resp):
+            try:
+                if hasattr(resp, "choices") and len(resp.choices) > 0:
+                    ch = resp.choices[0]
+                    if hasattr(ch, "finish_reason") and ch.finish_reason == "length":
+                        return True
+                    if hasattr(ch, "message") and hasattr(ch.message, "content") and not ch.message.content:
+                        return True
+                if hasattr(resp, "usage") and getattr(resp.usage, "completion_tokens", 0) >= 1000:
+                    return True
+            except Exception:
+                pass
+            return False
+
+        if is_gpt5 and _truncated(response):
+            for cap in (8192, 32768, 65536):
+                try:
+                    if payload.get("model") and ("gpt-5" in payload.get("model") or str(payload.get("model")).startswith("gpt5") or str(payload.get("model")).startswith("gpt-5")):
+                        payload["max_completion_tokens"] = cap
+                    else:
+                        payload["max_tokens"] = cap
+                    resp2 = client.chat.completions.create(**payload)
+                    # accept resp2 if it contains non-empty assistant text
+                    if hasattr(resp2, "choices") and len(resp2.choices) > 0:
+                        ch2 = resp2.choices[0]
+                        txt = ""
+                        if hasattr(ch2, "message") and hasattr(ch2.message, "content"):
+                            txt = ch2.message.content
+                        elif hasattr(ch2, "text"):
+                            txt = ch2.text
+                        if txt and txt.strip():
+                            response = resp2
+                            break
+                except Exception:
+                    continue
+    except Exception:
+        pass
 
     # optional debug dump of the raw SDK response when requested
     try:
@@ -152,8 +206,6 @@ def chat_completions(messages=None, model=None, max_tokens=None, temperature=Non
                 if not s:
                     continue
                 if re.match(r'^(chatcmpl-|req_|gpt-5|gpt5|gpt-4|gpt4|length$|assistant$|chat\.completion$|default$)', s):
-                    continue
-                if len(s) < 80 and re.match(r'^[A-Za-z0-9_\-]{4,}$', s) and not re.search(r'[():=<>"\'"\[\]{}]', s):
                     continue
                 out_lines.append(ln)
             return "\n".join(out_lines)

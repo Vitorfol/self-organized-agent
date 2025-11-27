@@ -21,9 +21,13 @@ if api_base:
 
 client = OpenAI(**{k: v for k, v in client_kwargs.items() if v is not None})
 
+# Store the last raw SDK response for debugging and fallback when extraction fails.
+LAST_RAW_RESPONSE = None
+LAST_RAW_RESPONSE_REPR = ""
+
 
 #@retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(6))
-def chat_completions(content, model, max_tokens=1000, temperature=0.0, json_mode=False, **kwargs):
+def chat_completions(content, model, max_tokens=4096, temperature=0.0, json_mode=False, **kwargs):
     """Wrapper for chat completions. Accepts extra kwargs and forwards them to the client.
 
     content: string to be sent as a single-user message.
@@ -46,19 +50,101 @@ def chat_completions(content, model, max_tokens=1000, temperature=0.0, json_mode
     # Normalize for GPT-5 family models: enforce allowed parameter values
     is_gpt5 = isinstance(model, str) and ("gpt-5" in model or model.startswith("gpt5") or model.startswith("gpt-5"))
 
+    # Try request; on some GPT-5 endpoints a BadRequest may indicate the
+    # model output limit (max tokens) was reached. In that case, retry with
+    # progressively larger max_completion_tokens values.
     try:
         response = client.chat.completions.create(**payload)
     except Exception as e:
         msg = str(e)
+        # handle temperature/value rejections as before
         if is_gpt5 and ("temperature" in msg or "Unsupported value" in msg or "does not support" in msg):
-            # retry with conservative temperature
             try:
                 payload["temperature"] = 1
                 response = client.chat.completions.create(**payload)
             except Exception:
                 raise
+        # handle token limit errors by retrying with higher limits
+        elif is_gpt5 and ("max_tokens" in msg or "max_completion_tokens" in msg or "model output limit" in msg or "max output" in msg):
+            # progressive token caps to try (conservative -> larger)
+            for cap in (2048, 8192, 32768):
+                try:
+                    if "max_completion_tokens" in payload:
+                        payload["max_completion_tokens"] = cap
+                    else:
+                        payload["max_tokens"] = cap
+                    response = client.chat.completions.create(**payload)
+                    break
+                except Exception:
+                    response = None
+                    continue
+            if response is None:
+                # re-raise original error if retries exhausted
+                raise
         else:
             raise
+
+    # store raw response for debugging
+    try:
+        global LAST_RAW_RESPONSE, LAST_RAW_RESPONSE_REPR
+        LAST_RAW_RESPONSE = response
+        LAST_RAW_RESPONSE_REPR = repr(response)
+    except Exception:
+        pass
+
+    # If the model finished due to length (truncated), attempt a retry with
+    # larger max tokens for GPT-5 family. Some endpoints return finish_reason
+    # == 'length' but don't raise an error; we should try to request more.
+    try:
+        def _response_truncated(resp):
+            try:
+                if hasattr(resp, "choices") and len(resp.choices) > 0:
+                    ch = resp.choices[0]
+                    # new-style may use finish_reason attr
+                    if hasattr(ch, "finish_reason") and ch.finish_reason == "length":
+                        return True
+                    # empty assistant content is suspicious
+                    if hasattr(ch, "message") and hasattr(ch.message, "content") and not ch.message.content:
+                        return True
+                # usage-based heuristic
+                if hasattr(resp, "usage"):
+                    u = resp.usage
+                    try:
+                        # if completion tokens equals a fairly large number, maybe truncated
+                        if getattr(u, "completion_tokens", 0) >= 1000:
+                            return True
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            return False
+
+        if is_gpt5 and _response_truncated(response):
+            # try progressively larger caps
+            for cap in (8192, 32768, 65536):
+                try:
+                    if "max_completion_tokens" in payload:
+                        payload["max_completion_tokens"] = cap
+                    else:
+                        payload["max_tokens"] = cap
+                    response_retry = client.chat.completions.create(**payload)
+                    # update raw and use the retry if it contains content
+                    if hasattr(response_retry, "choices") and len(response_retry.choices) > 0:
+                        ch = response_retry.choices[0]
+                        txt = ""
+                        if hasattr(ch, "message") and hasattr(ch.message, "content"):
+                            txt = ch.message.content
+                        elif hasattr(ch, "text"):
+                            txt = ch.text
+                        if txt and txt.strip():
+                            response = response_retry
+                            LAST_RAW_RESPONSE = response_retry
+                            LAST_RAW_RESPONSE_REPR = repr(response_retry)
+                            break
+                except Exception:
+                    continue
+    except Exception:
+        pass
 
     # best-effort extraction of content
     # optional debug dump
@@ -115,7 +201,8 @@ def chat_completions(content, model, max_tokens=1000, temperature=0.0, json_mode
     if candidate:
         # prefer fenced python blocks if present
         import re
-        # sanitize candidate by removing common SDK metadata lines
+        # sanitize candidate by removing common SDK metadata lines (but don't
+        # aggressively strip single-token lines which may be valid code)
         def _sanitize(text: str) -> str:
             out_lines = []
             for ln in text.splitlines():
@@ -124,9 +211,6 @@ def chat_completions(content, model, max_tokens=1000, temperature=0.0, json_mode
                     continue
                 # skip obvious SDK metadata tokens/headers
                 if re.match(r'^(chatcmpl-|req_|gpt-5|gpt5|gpt-4|gpt4|length$|assistant$|chat\.completion$|default$)', s):
-                    continue
-                # skip short single-token lines that look like ids/hashes
-                if len(s) < 80 and re.match(r'^[A-Za-z0-9_\-]{4,}$', s) and not re.search(r'[():=<>"\'"\[\]{}]', s):
                     continue
                 out_lines.append(ln)
             return "\n".join(out_lines)

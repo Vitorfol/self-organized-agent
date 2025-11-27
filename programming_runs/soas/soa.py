@@ -1,6 +1,7 @@
 from typing import List, Dict, Union, Tuple
 from . import py_utils
 from .agent import Agent, ChildAgent, MotherAgent
+from . import api as soas_api
 
 
 py_executor = py_utils.MyPythonExecute("gpt-3.5-turbo-1106")
@@ -23,6 +24,19 @@ def generate(agent: Agent, depth: int, max_depth: int, model_name: str, model_kw
         agent.update_memory(code)
     else: # Mother
         skeleton = agent.generate_skeleton(agent.docstrings)
+        # preserve the raw skeleton (model reply) separately so we don't lose
+        # the original text when we sanitize/parse it into `code`.
+        try:
+            # if the extracted skeleton is empty, try to use the raw SDK
+            # response repr as a fallback so we at least persist what the
+            # model returned.
+            if skeleton is None or not isinstance(skeleton, str) or not skeleton.strip():
+                raw = getattr(soas_api, "LAST_RAW_RESPONSE_REPR", "")
+                agent.raw_skeleton = raw or ""
+            else:
+                agent.raw_skeleton = skeleton
+        except Exception:
+            agent.raw_skeleton = ""
         # Try to extract the specific function implementation; if extraction
         # fails (agent returned an unexpected format), fall back to using the
         # entire python source extracted from the skeleton so the run can continue.
@@ -101,7 +115,7 @@ def generate_and_modify_code_with_soa(function_name: str, docstrings: str, unit_
 
     combined = combine_implementations(root_mother)
     # raw_skeleton: best-effort last known root mother code
-    raw = getattr(root_mother, "code", "") or ""
+    raw = getattr(root_mother, "raw_skeleton", "") or getattr(root_mother, "code", "") or ""
     return {"implementation": combined, "raw_skeleton": raw}
 
 

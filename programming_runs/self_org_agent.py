@@ -40,70 +40,25 @@ def run_soa(
     num_success = resume_success_count(dataset)
 
     for i, item in enumerate_resume(dataset, log_path):
-        cur_func_impl_is_None = True
-        while cur_func_impl_is_None:
-            cur_pass = 0
-            is_solved = False
-            #implementations = []
-            test_feedback = []
-            cur_func_impl = ""
+        # Simplified flow: only generate code and save it. Skip generating or
+        # executing tests to avoid loops during the testing phase.
+        test_feedback = []
 
-            while cur_pass < pass_at_k and not is_solved:
-                assert not is_leetcode
-                tests_i = gen.internal_tests(item["prompt"], model_for_gen_test, 3)
+        docstrings = item["prompt"]
+        function_name = item["entry_point"]
+        # Call the SOA generator once; don't run iterative modification or tests.
+        result = soas.generate_and_modify_code_with_soa(function_name, docstrings, [], max_depth, 1, model_name, model_kwargs=model_kwargs)
+        # support old return (string) and new return (dict)
+        if isinstance(result, dict):
+            impl = result.get("implementation") or ""
+            raw = result.get("raw_skeleton") or ""
+            # prefer implementation but fall back to raw skeleton
+            cur_func_impl = impl if impl and impl.strip() else raw
+        else:
+            cur_func_impl = result
 
-                docstrings = item["prompt"]
-                function_name = item["entry_point"]
-                unit_tests = tests_i
-
-                # If the dataset doesn't provide an external `test` (e.g. CLI inline
-                # prompt), create a simple `def check(candidate): ...` wrapper from
-                # the internally-generated asserts so `PyExecutor.evaluate` can run
-                # the final test. The internal tests are typically asserts that
-                # call the function by name, so replace calls to the function name
-                # with `candidate(...)` inside the check wrapper.
-                eval_test = item.get('test', '')
-                if not eval_test or not eval_test.strip():
-                    # build check(candidate) wrapper from unit_tests (list of assert strings)
-                    try:
-                        lines = []
-                        for t in unit_tests:
-                            # replace occurrences like `fname(` with `candidate(`
-                            if isinstance(t, str):
-                                lines.append(t.replace(f"{function_name}(", "candidate("))
-                        if lines:
-                            eval_test = "def check(candidate):\n" + "\n".join([f"    {ln}" for ln in lines])
-                        else:
-                            eval_test = ""
-                    except Exception:
-                        eval_test = ""
-
-                max_iterations = max_iters
-                result = soas.generate_and_modify_code_with_soa(function_name, docstrings, unit_tests, max_depth, max_iterations, model_name, model_kwargs=model_kwargs)
-                # support old return (string) and new return (dict)
-                if isinstance(result, dict):
-                    impl = result.get("implementation") or ""
-                    raw = result.get("raw_skeleton") or ""
-                    # prefer implementation but fall back to raw skeleton
-                    cur_func_impl = impl if impl and impl.strip() else raw
-                else:
-                    cur_func_impl = result
-
-                # run final test; prefer external dataset `test` if present,
-                # otherwise use the `eval_test` wrapper we just constructed
-                is_solved = soas.final_test(function_name, cur_func_impl, eval_test)
-
-                cur_pass += 1
-
-                num_success += int(is_solved)
-
-                if cur_func_impl is None:
-                    cur_func_impl_is_None = True
-                    break
-                else:
-                    cur_func_impl_is_None = False                
-
-                item["is_solved"] = is_solved
+        # When skipping tests, mark as not solved and leave test_feedback empty
+        item["is_solved"] = False
         item["test_feedback"] = test_feedback
         # persist raw model output (if available) to help debugging extraction issues
         try:
@@ -149,6 +104,4 @@ def run_soa(
         write_jsonl(log_path, [item], append=True)
         print_v(
             f'completed {i+1}/{num_items}: acc = {round(num_success/(i+1), 2)}')
-        
-        break
 
