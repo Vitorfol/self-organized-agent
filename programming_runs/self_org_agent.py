@@ -15,11 +15,25 @@ def run_soa(
     log_path: str,
     verbose: bool,
     max_depth: int,
-    is_leetcode: bool = False
+    is_leetcode: bool = False,
+    model_params: dict = None,
 ) -> None:
     #exe = executor_factory(language, is_leet=is_leetcode)
     gen = generator_factory(language)
-    model_for_gen_test = model_factory("gpt-4-0125-preview")
+    # Try to use the same model (provided via CLI) to generate internal tests.
+    # If the account/project doesn't have access to that model (PermissionDenied),
+    # fall back to a widely-available model (gpt-3.5-turbo-1106) to keep the
+    # pipeline running.
+    model_kwargs = model_params or {}
+    try:
+        model_for_gen_test = model_factory(model_name, model_kwargs=model_kwargs)
+    except Exception:
+        try:
+            model_for_gen_test = model_factory("gpt-3.5-turbo-1106")
+        except Exception:
+            # last-resort: create a generic chat wrapper
+            from generators.model import GPTChat
+            model_for_gen_test = GPTChat("gpt-3.5-turbo-1106")
     print_v = make_printv(verbose)
 
     num_items = len(dataset)
@@ -43,7 +57,7 @@ def run_soa(
                 unit_tests = tests_i
 
                 max_iterations = max_iters
-                cur_func_impl = soas.generate_and_modify_code_with_soa(function_name, docstrings, unit_tests, max_depth, max_iterations, model_name)
+                cur_func_impl = soas.generate_and_modify_code_with_soa(function_name, docstrings, unit_tests, max_depth, max_iterations, model_name, model_kwargs=model_kwargs)
                 eval_test = item['test']
                 is_solved = soas.final_test(function_name, cur_func_impl, eval_test)
 

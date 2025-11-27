@@ -6,16 +6,16 @@ from .agent import Agent, ChildAgent, MotherAgent
 py_executor = py_utils.MyPythonExecute("gpt-3.5-turbo-1106")
 
 
-def generate_agent(agent: Agent, subtask_funcname: str, subtask_docstrings: str, depth: int, max_depth: int, model_name: str):
+def generate_agent(agent: Agent, subtask_funcname: str, subtask_docstrings: str, depth: int, max_depth: int, model_name: str, model_kwargs: dict = None):
     if depth + 1 == max_depth:
-        next_agent = ChildAgent(subtask_funcname, subtask_docstrings, model_name)
+        next_agent = ChildAgent(subtask_funcname, subtask_docstrings, model_name, model_kwargs=model_kwargs)
     else:
-        next_agent = MotherAgent(subtask_funcname, subtask_docstrings, model_name)
+        next_agent = MotherAgent(subtask_funcname, subtask_docstrings, model_name, model_kwargs=model_kwargs)
     agent.subagents.append(next_agent)
     return next_agent
 
 
-def generate(agent: Agent, depth: int, max_depth: int, model_name: str):
+def generate(agent: Agent, depth: int, max_depth: int, model_name: str, model_kwargs: dict = None):
     print(f"generation\tmax_depth: {max_depth}\t depth: {depth}\tagent_type: {agent.agent_type}")
 
     if depth == max_depth:  # Child
@@ -29,7 +29,7 @@ def generate(agent: Agent, depth: int, max_depth: int, model_name: str):
         print(code)
         print()
         for subtask_funcname, subtask_docstrings in agent.get_subtasks(skeleton):
-            next_agent = generate_agent(agent, subtask_funcname, subtask_docstrings, depth, max_depth, model_name)
+            next_agent = generate_agent(agent, subtask_funcname, subtask_docstrings, depth, max_depth, model_name, model_kwargs=model_kwargs)
             generate(next_agent, depth + 1, max_depth, model_name)
 
 
@@ -53,9 +53,9 @@ def modify(agent: Agent, test_result: bool, upper_agent_observation: Union[Dict,
             modify(subagent, subagent_test_result, agent_observation, depth + 1, max_depth)
 
 
-def generate_and_modify_code_with_soa(function_name: str, docstrings: str, unit_tests: List[str], max_depth: int, max_iterations: int, model_name: str) -> str:
-    root_mother = MotherAgent(function_name, docstrings, model_name=model_name)
-    generate(root_mother, 1, max_depth, model_name)
+def generate_and_modify_code_with_soa(function_name: str, docstrings: str, unit_tests: List[str], max_depth: int, max_iterations: int, model_name: str, model_kwargs: dict = None) -> str:
+    root_mother = MotherAgent(function_name, docstrings, model_name=model_name, model_kwargs=model_kwargs)
+    generate(root_mother, 1, max_depth, model_name, model_kwargs=model_kwargs)
 
     for i in range(max_iterations):
         print(f"iter: {i+1}")

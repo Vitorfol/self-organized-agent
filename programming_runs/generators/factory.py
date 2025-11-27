@@ -1,7 +1,7 @@
 from .py_generate import PyGenerator
 #from .rs_generate import RsGenerator
 from .generator_types import Generator
-from .model import CodeLlama, ModelBase, GPT4, GPT35, StarChat, GPTDavinci
+from .model import CodeLlama, ModelBase, GPT4, GPT35, StarChat, GPTDavinci, GPTChat
 
 
 def generator_factory(lang: str) -> Generator:
@@ -14,13 +14,22 @@ def generator_factory(lang: str) -> Generator:
         raise ValueError(f"Invalid language for generator: {lang}")
 
 
-def model_factory(model_name: str) -> ModelBase:
+def model_factory(model_name: str, model_kwargs: dict = None) -> ModelBase:
+    # support specific named classes for older behavior, but default to a
+    # generic GPTChat wrapper for any `gpt-*` model (including gpt-5 names)
     if "gpt-4" in model_name:
-        return GPT4()
-        #elif model_name == "gpt-3.5-turbo":
-        #    return GPT35()
+        m = GPT4()
+        m.model_kwargs = model_kwargs or {}
+        return m
     elif model_name == "gpt-3.5-turbo-1106":
-        return GPT35()
+        m = GPT35()
+        m.model_kwargs = model_kwargs or {}
+        return m
+    elif model_name.startswith("gpt-") or model_name.startswith("gpt"):
+        # generic chat model wrapper (supports gpt-5 family names too)
+        m = GPTChat(model_name)
+        m.model_kwargs = model_kwargs or {}
+        return m
     elif model_name == "starchat":
         return StarChat()
     elif model_name.startswith("codellama"):

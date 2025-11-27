@@ -27,32 +27,51 @@ def messages_to_str(messages: List[Message]) -> str:
 
 
 import os
+import logging
 from openai import OpenAI
-client = OpenAI(
-    api_key=os.environ["OPENAI_API_SECRET_KEY"], 
-    max_retries=4,
-    #timeout=60,
-)
+
+logger = logging.getLogger(__name__)
+
+# Prefer the standard env var, fallback to the older name for compatibility
+api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_API_SECRET_KEY")
+if api_key is None:
+    logger.warning("No OpenAI API key found in OPENAI_API_KEY or OPENAI_API_SECRET_KEY; API calls will fail until you set one.")
+
+# Allow configuring API base (for enterprise / proxies) via env too
+api_base = os.getenv("OPENAI_API_BASE") or os.getenv("OPENAI_API_URL")
+
+client_kwargs = {"api_key": api_key, "max_retries": 4}
+if api_base:
+    client_kwargs["base_url"] = api_base
+
+client = OpenAI(**{k: v for k, v in client_kwargs.items() if v is not None})
 
 #@retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(6))
-def chat_completions(messages, model, max_tokens, temperature, json_mode=False):
-    if json_mode:
-        response = client.chat.completions.create(
-                model = model,
-                #messages=[{"role": "user", "content": content}],
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                response_format={"type": "json_object"}
-            )
-    else:
-        response = client.chat.completions.create(
-                model = model,
-                #messages=[{"role": "user", "content": content}],
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
+def chat_completions(messages=None, model=None, max_tokens=None, temperature=None, json_mode=False, **kwargs):
+    """Wrapper around the OpenAI client's chat completions that forwards unknown
+    keyword args (so we remain compatible with newer model parameters).
+
+    messages: list of dict or None. If None and kwargs contains 'messages', will use that.
+    """
+    payload = {}
+    if model is not None:
+        payload["model"] = model
+    if messages is not None:
+        payload["messages"] = messages
+    # allow callers to pass content instead of messages
+    if "content" in kwargs and payload.get("messages") is None:
+        payload["messages"] = [{"role": "user", "content": kwargs.pop("content")}]
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    if temperature is not None:
+        payload["temperature"] = temperature
+
+    # merge any other kwargs (e.g., response_format, modalities, etc.)
+    payload.update(kwargs)
+
+    # forward call to client; this keeps compatibility with newer models that may
+    # accept extra parameters
+    response = client.chat.completions.create(**payload)
     return response
 
 def gpt_completion(
@@ -62,23 +81,48 @@ def gpt_completion(
         stop_strs: Optional[List[str]] = None,
         temperature: float = 0.0,
         num_comps=1,
+        **kwargs,
 ) -> Union[List[str], str]:
-    assert "got-3.5" in model, model
+    # Accept any model name (gpt-3.5/gpt-4/gpt-5...) and forward extra kwargs.
+    if not isinstance(model, str):
+        raise ValueError("model must be a string")
+
+    messages = [{"role": "user", "content": prompt}]
     response = chat_completions(
         model=model,
-        content=prompt, # messagesにすべき
+        messages=messages,
         temperature=temperature,
         max_tokens=max_tokens,
-        #top_p=1,
-        #frequency_penalty=0.0,
-        #presence_penalty=0.0,
-        #stop=stop_strs,
-        #n=num_comps,
+        **({} if stop_strs is None else {"stop": stop_strs}),
+        **kwargs,
     )
-    if num_comps == 1:
-        return response.choices[0].text  # type: ignore
 
-    return [choice.text for choice in response.choices]  # type: ignore
+    # response shape may vary; handle common shapes safely
+    if hasattr(response, "choices") and len(response.choices) > 0:
+        choice = response.choices[0]
+        # new chat responses put text in .message.content; older completions used .text
+        if hasattr(choice, "message") and hasattr(choice.message, "content"):
+            out = choice.message.content
+        elif hasattr(choice, "text"):
+            out = choice.text
+        else:
+            out = str(choice)
+    else:
+        out = str(response)
+
+    if num_comps == 1:
+        return out
+
+    # return list of outputs
+    outs = []
+    for c in getattr(response, "choices", []):
+        if hasattr(c, "message") and hasattr(c.message, "content"):
+            outs.append(c.message.content)
+        elif hasattr(c, "text"):
+            outs.append(c.text)
+        else:
+            outs.append(str(c))
+    return outs
 #--------------------------------------------------------------
 
 #@retry(wait=wait_random_exponential(min=1, max=180), stop=stop_after_attempt(6))
@@ -89,7 +133,9 @@ def gpt_chat(
     temperature: float = 0.0,
     num_comps=1,
 ) -> Union[List[str], str]:
-    assert "gpt-3.5" in model or "gpt-4" in model, model
+    # don't restrict model names; accept gpt-3.5, gpt-4, gpt-5, etc.
+    if not isinstance(model, str):
+        raise ValueError("model must be a string")
     #print([dataclasses.asdict(message) for message in messages])
     #response = openai.ChatCompletion.create(
     #    model=model,
@@ -117,6 +163,8 @@ class ModelBase():
     def __init__(self, name: str):
         self.name = name
         self.is_chat = False
+        # container for model-specific kwargs provided at construction time
+        self.model_kwargs = {}
 
     def __repr__(self) -> str:
         return f'{self.name}'
@@ -133,8 +181,14 @@ class GPTChat(ModelBase):
         self.name = model_name
         self.is_chat = True
 
-    def generate_chat(self, messages: List[Message], max_tokens: int = 1024, temperature: float = 0.2, num_comps: int = 1) -> Union[List[str], str]:
-        return gpt_chat(self.name, messages, max_tokens, temperature, num_comps)
+    def generate_chat(self, messages: List[Message], max_tokens: int = 1024, temperature: float = 0.2, num_comps: int = 1, **model_kwargs) -> Union[List[str], str]:
+        # merge model instance default kwargs with call-time kwargs
+        merged = {}
+        if hasattr(self, "model_kwargs") and isinstance(self.model_kwargs, dict):
+            merged.update(self.model_kwargs)
+        merged.update(model_kwargs)
+        # forward model-specific kwargs (for newer model parameters like modalities, response_format, etc.)
+        return gpt_chat(self.name, messages, max_tokens=max_tokens, temperature=temperature, num_comps=num_comps, **merged)
 
 
 class GPT4(GPTChat):

@@ -28,6 +28,7 @@ def get_args():
                         help="Unit test code (string) for the inline task", default=None)
     parser.add_argument(
         "--model", type=str, help="OpenAI models only for now. For best results, use GPT-4")
+    parser.add_argument("--model_params", type=str, help="JSON string of model params to forward to the model client (e.g. '{\"response_format\": {\"type\": \"json_object\"}}')", default=None)
     parser.add_argument("--pass_at_k", type=int,
                         help="Pass@k metric", default=1)
     parser.add_argument("--max_iters", type=int,
@@ -152,6 +153,15 @@ pass@k: {args.pass_at_k}
     print(f"Loaded {len(dataset)} examples")
     # start the run
     # evaluate with pass@k
+    # parse model params if provided
+    import json
+    model_params = {}
+    if args.model_params:
+        try:
+            model_params = json.loads(args.model_params)
+        except Exception:
+            raise ValueError("--model_params must be a valid JSON string")
+
     run_strategy(
         dataset=dataset,
         model_name=args.model,
@@ -163,6 +173,7 @@ pass@k: {args.pass_at_k}
         expansion_factor=args.expansion_factor,
         max_depth=args.max_depth,
         is_leetcode=False, #args.is_leetcode
+        model_params=model_params,
     )
 
     print(f"Done! Check out the logs in `{log_path}`")

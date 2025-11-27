@@ -6,7 +6,11 @@ import jsonlines
 
 from typing import List
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# prefer standard name but keep backward-compatible fallback
+openai.api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_API_SECRET_KEY")
+if openai.api_key is None:
+    # don't fail at import time; just warn
+    print("Warning: OPENAI_API_KEY / OPENAI_API_SECRET_KEY not set. OpenAI calls will fail until you export a key.")
 
 
 def make_printv(verbose: bool):
