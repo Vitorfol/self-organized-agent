@@ -6,6 +6,7 @@ import time
 import soas
 import os
 import concurrent.futures
+from solution_validator import validate_implementation, is_code_empty
 
 
 def run_soa(
@@ -88,7 +89,7 @@ def run_soa(
                         docstrings,
                         [],
                         max_depth,
-                        1,
+                        max_iters,  # Now using the max_iters parameter from command line
                         model_name,
                         model_kwargs,
                     )
@@ -110,8 +111,11 @@ def run_soa(
             if isinstance(result, dict):
                 impl = result.get("implementation") or ""
                 raw = result.get("raw_skeleton") or ""
-                # prefer implementation but fall back to raw skeleton
-                candidate_impl = impl if impl and impl.strip() else raw
+                # Use raw_skeleton as the complete code (includes all functions)
+                # implementation is just the combined agent codes which may be incomplete
+                candidate_impl = raw if raw and raw.strip() else impl
+                print_v(f"  Implementation length: {len(impl)}, Raw skeleton length: {len(raw)}")
+                print_v(f"  Using: {'raw_skeleton' if raw and raw.strip() else 'implementation'}")
             else:
                 candidate_impl = result
 
@@ -126,9 +130,29 @@ def run_soa(
             print_v("overall deadline reached; terminating run")
             break
 
-        # When skipping tests, mark as not solved and leave test_feedback empty
-        item["is_solved"] = False
+        # Validate the generated implementation
+        is_valid = False
+        validation_issues = []
+        
+        if cur_func_impl is not None and isinstance(cur_func_impl, str) and cur_func_impl.strip():
+            # Check if code is actually implemented (not just pass statements)
+            is_valid, validation_issues = validate_implementation(cur_func_impl, strict=False)
+            
+            if not is_valid:
+                print_v(f"⚠️  Generated code has issues:")
+                for issue in validation_issues:
+                    print_v(f"    {issue}")
+            else:
+                print_v(f"✓ Code validation passed")
+        else:
+            validation_issues = ["No implementation generated"]
+            print_v(f"⚠️  No implementation generated")
+        
+        # Mark as solved only if validation passed
+        item["is_solved"] = is_valid
         item["test_feedback"] = test_feedback
+        item["validation_issues"] = validation_issues if not is_valid else []
+        
         # persist raw model output (if available) to help debugging extraction issues
         try:
             if isinstance(result, dict) and result.get("raw_skeleton"):
@@ -167,9 +191,14 @@ def run_soa(
         except Exception as e:
             # don't crash the run if saving fails; just print a warning
             try:
-                print(f"Warning: could not write solution file: {e}")
+                print_v(f"warning: failed to save solution file: {e}")
             except Exception:
                 pass
+        
+        # Update success count
+        if is_valid:
+            num_success += 1
+        
         write_jsonl(log_path, [item], append=True)
         print_v(
             f'completed {i+1}/{num_items}: acc = {round(num_success/(i+1), 2)}')

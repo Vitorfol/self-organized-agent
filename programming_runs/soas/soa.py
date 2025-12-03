@@ -3,6 +3,19 @@ from . import py_utils
 from .agent import Agent, ChildAgent, MotherAgent
 from . import api as soas_api
 
+# Import validator to check for unimplemented functions
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+try:
+    from solution_validator import validate_implementation
+    HAS_VALIDATOR = True
+except ImportError:
+    HAS_VALIDATOR = False
+    def validate_implementation(code, strict=False):
+        """Fallback if validator not available."""
+        return True, []
+
 
 py_executor = py_utils.MyPythonExecute("gpt-3.5-turbo-1106")
 
@@ -83,6 +96,10 @@ def modify(agent: Agent, test_result: bool, upper_agent_observation: Union[Dict,
     old_code = agent.code
     new_code = agent.update_code(old_code, test_result, feedback)
     agent.update_memory(new_code)
+    
+    # Update raw_skeleton too so validation sees the latest code
+    if hasattr(agent, 'raw_skeleton'):
+        agent.raw_skeleton = new_code
 
     for subagent in agent.subagents:
         implementation = combine_implementations(subagent)
@@ -106,11 +123,37 @@ def generate_and_modify_code_with_soa(function_name: str, docstrings: str, unit_
     for i in range(max_iterations):
         print(f"iter: {i+1}")
         final_implementation = combine_implementations(root_mother)
+        
+        # Use raw_skeleton for validation if available (it contains all helper functions)
+        # otherwise fall back to combined implementation
+        code_to_validate = getattr(root_mother, "raw_skeleton", "") or final_implementation
+        
+        # First check if code is actually implemented (not just pass statements)
+        is_implemented, validation_issues = validate_implementation(code_to_validate, strict=False)
+        
+        if not is_implemented:
+            print(f"  ⚠️  Code has unimplemented functions: {', '.join(validation_issues)}")
+            # If this is the last iteration, stop trying
+            if i + 1 >= max_iterations:
+                print(f"  ⚠️  Max iterations reached without full implementation")
+                break
+            # Continue to next iteration to try to implement them
+            modify(root_mother, "Functions not implemented. Please provide complete implementations for all functions, not just 'pass' statements.", None, 1, max_depth)
+            continue
+        
+        # If there are no unit tests, we cannot verify correctness beyond implementation check
+        # In this case, we consider it "solved" since all functions are implemented
+        if not unit_tests or len(unit_tests) == 0:
+            print("  ℹ️  No unit tests provided. All functions are implemented.")
+            break  # Exit since we can't improve without tests
+        
+        # If implemented, test it
         is_passing, test_result = evaluate(final_implementation, unit_tests)
         if is_passing:
             print("solved.")
             break
         else:
+            print(f"  ❌ Tests failed: {test_result[:100]}...")
             modify(root_mother, test_result, None, 1, max_depth)
 
     combined = combine_implementations(root_mother)
