@@ -15,21 +15,37 @@ def generator_factory(lang: str) -> Generator:
 
 
 def model_factory(model_name: str, model_kwargs: dict = None) -> ModelBase:
-    # support specific named classes for older behavior, but default to a
-    # generic GPTChat wrapper for any `gpt-*` model (including gpt-5 names)
-    if "gpt-4" in model_name:
-        m = GPT4()
+    """Create a model instance based on the model name.
+    
+    Supports:
+    - GPT-4 family: gpt-4, gpt-4-turbo, gpt-4o, gpt-4o-mini, etc. (uses max_tokens)
+    - GPT-3.5 family: gpt-3.5-turbo, gpt-3.5-turbo-1106, etc. (uses max_tokens)
+    - GPT-5 family: gpt-5, gpt-5-mini, gpt-5-turbo, etc. (uses max_completion_tokens)
+    - Legacy models: text-davinci-*, codellama, starchat
+    """
+    model_lower = model_name.lower()
+    
+    # GPT-4 family (all variants)
+    if "gpt-4" in model_lower or model_lower.startswith("gpt4"):
+        m = GPT4() if model_name == "gpt-4" else GPTChat(model_name)
         m.model_kwargs = model_kwargs or {}
         return m
-    elif model_name == "gpt-3.5-turbo-1106":
-        m = GPT35()
+    # GPT-3.5 family
+    elif "gpt-3.5" in model_lower or "gpt-35" in model_lower:
+        m = GPT35() if model_name == "gpt-3.5-turbo-1106" else GPTChat(model_name)
         m.model_kwargs = model_kwargs or {}
         return m
-    elif model_name.startswith("gpt-") or model_name.startswith("gpt"):
-        # generic chat model wrapper (supports gpt-5 family names too)
+    # GPT-5 family (new models)
+    elif "gpt-5" in model_lower or model_lower.startswith("gpt5"):
         m = GPTChat(model_name)
         m.model_kwargs = model_kwargs or {}
         return m
+    # Generic GPT models (catch-all for other gpt-* variants)
+    elif model_name.startswith("gpt-") or model_name.startswith("gpt"):
+        m = GPTChat(model_name)
+        m.model_kwargs = model_kwargs or {}
+        return m
+    # Legacy models
     elif model_name == "starchat":
         return StarChat()
     elif model_name.startswith("codellama"):

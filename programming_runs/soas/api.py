@@ -26,6 +26,39 @@ LAST_RAW_RESPONSE = None
 LAST_RAW_RESPONSE_REPR = ""
 
 
+def is_gpt5_model(model_name: str) -> bool:
+    """Detect if a model is from the GPT-5 family.
+    
+    GPT-5 models use max_completion_tokens instead of max_tokens.
+    """
+    if not isinstance(model_name, str):
+        return False
+    model_lower = model_name.lower()
+    # Check for gpt-5 or gpt5 patterns
+    return "gpt-5" in model_lower or model_lower.startswith("gpt5")
+
+
+def is_gpt4_or_older(model_name: str) -> bool:
+    """Detect if a model is GPT-4, GPT-3.5, or older.
+    
+    These models use max_tokens parameter.
+    """
+    if not isinstance(model_name, str):
+        return False
+    model_lower = model_name.lower()
+    # Check for gpt-4, gpt-3.5, gpt-3, davinci, etc.
+    return (
+        "gpt-4" in model_lower or 
+        "gpt-3" in model_lower or
+        model_lower.startswith("gpt4") or
+        model_lower.startswith("gpt3") or
+        "davinci" in model_lower or
+        "curie" in model_lower or
+        "babbage" in model_lower or
+        "ada" in model_lower
+    )
+
+
 #@retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(6))
 def chat_completions(content, model, max_tokens=4096, temperature=0.0, json_mode=False, **kwargs):
     """Wrapper for chat completions. Accepts extra kwargs and forwards them to the client.
@@ -39,16 +72,30 @@ def chat_completions(content, model, max_tokens=4096, temperature=0.0, json_mode
         "messages": [{"role": "user", "content": content}],
         "temperature": temperature,
     }
-    # map legacy `max_tokens` to `max_completion_tokens` for newer models (GPT-5 family)
-    if max_tokens is not None:
-        if isinstance(model, str) and ("gpt-5" in model or model.startswith("gpt5") or model.startswith("gpt-5")):
-            payload["max_completion_tokens"] = max_tokens
-        else:
-            payload["max_tokens"] = max_tokens
+    
+    # Handle max_tokens / max_completion_tokens intelligently
+    # Check if user passed either parameter in kwargs
+    user_max_completion_tokens = kwargs.pop("max_completion_tokens", None)
+    user_max_tokens = kwargs.pop("max_tokens", None)
+    
+    is_gpt5 = is_gpt5_model(model)
+    
+    # Determine which token limit to use based on model and what user provided
+    if is_gpt5:
+        # GPT-5 uses max_completion_tokens
+        token_limit = user_max_completion_tokens or user_max_tokens or max_tokens
+        if token_limit is not None:
+            payload["max_completion_tokens"] = token_limit
+    else:
+        # GPT-4 and older use max_tokens
+        token_limit = user_max_tokens or user_max_completion_tokens or max_tokens
+        if token_limit is not None:
+            payload["max_tokens"] = token_limit
+    
     payload.update(kwargs)
 
     # Normalize for GPT-5 family models: enforce allowed parameter values
-    is_gpt5 = isinstance(model, str) and ("gpt-5" in model or model.startswith("gpt5") or model.startswith("gpt-5"))
+    # (is_gpt5 already set above)
 
     # Try request; on some GPT-5 endpoints a BadRequest may indicate the
     # model output limit (max tokens) was reached. In that case, retry with

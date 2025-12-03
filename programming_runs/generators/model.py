@@ -46,6 +46,39 @@ if api_base:
 
 client = OpenAI(**{k: v for k, v in client_kwargs.items() if v is not None})
 
+
+def is_gpt5_model(model_name: str) -> bool:
+    """Detect if a model is from the GPT-5 family.
+    
+    GPT-5 models use max_completion_tokens instead of max_tokens.
+    """
+    if not isinstance(model_name, str):
+        return False
+    model_lower = model_name.lower()
+    # Check for gpt-5 or gpt5 patterns
+    return "gpt-5" in model_lower or model_lower.startswith("gpt5")
+
+
+def is_gpt4_or_older(model_name: str) -> bool:
+    """Detect if a model is GPT-4, GPT-3.5, or older.
+    
+    These models use max_tokens parameter.
+    """
+    if not isinstance(model_name, str):
+        return False
+    model_lower = model_name.lower()
+    # Check for gpt-4, gpt-3.5, gpt-3, davinci, etc.
+    return (
+        "gpt-4" in model_lower or 
+        "gpt-3" in model_lower or
+        model_lower.startswith("gpt4") or
+        model_lower.startswith("gpt3") or
+        "davinci" in model_lower or
+        "curie" in model_lower or
+        "babbage" in model_lower or
+        "ada" in model_lower
+    )
+
 #@retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(6))
 def chat_completions(messages=None, model=None, max_tokens=None, temperature=None, json_mode=False, **kwargs):
     """Wrapper around the OpenAI client's chat completions that forwards unknown
@@ -61,14 +94,27 @@ def chat_completions(messages=None, model=None, max_tokens=None, temperature=Non
     # allow callers to pass content instead of messages
     if "content" in kwargs and payload.get("messages") is None:
         payload["messages"] = [{"role": "user", "content": kwargs.pop("content")}]
-    if max_tokens is not None:
-        # Newer models (e.g. GPT-5 family) expect `max_completion_tokens` instead
-        # of the legacy `max_tokens`. Detect by model name and map accordingly.
-        model_name_for_map = payload.get("model") if isinstance(payload.get("model"), str) else ""
-        if model_name_for_map and ("gpt-5" in model_name_for_map or model_name_for_map.startswith("gpt5") or model_name_for_map.startswith("gpt-5")):
-            payload["max_completion_tokens"] = max_tokens
-        else:
-            payload["max_tokens"] = max_tokens
+    
+    # Handle max_tokens / max_completion_tokens intelligently
+    # Check if user passed either parameter in kwargs
+    user_max_completion_tokens = kwargs.pop("max_completion_tokens", None)
+    user_max_tokens = kwargs.pop("max_tokens", None)
+    
+    model_name_for_map = payload.get("model") if isinstance(payload.get("model"), str) else ""
+    is_gpt5 = is_gpt5_model(model_name_for_map)
+    
+    # Determine which token limit to use based on model and what user provided
+    if is_gpt5:
+        # GPT-5 uses max_completion_tokens
+        token_limit = user_max_completion_tokens or user_max_tokens or max_tokens
+        if token_limit is not None:
+            payload["max_completion_tokens"] = token_limit
+    else:
+        # GPT-4 and older use max_tokens
+        token_limit = user_max_tokens or user_max_completion_tokens or max_tokens
+        if token_limit is not None:
+            payload["max_tokens"] = token_limit
+    
     if temperature is not None:
         payload["temperature"] = temperature
 
@@ -76,8 +122,7 @@ def chat_completions(messages=None, model=None, max_tokens=None, temperature=Non
     payload.update(kwargs)
 
     # Some newer models (GPT-5 family) may restrict allowed parameter values
-    model_name_for_map = payload.get("model") if isinstance(payload.get("model"), str) else ""
-    is_gpt5 = bool(model_name_for_map and ("gpt-5" in model_name_for_map or model_name_for_map.startswith("gpt5") or model_name_for_map.startswith("gpt-5")))
+    # (is_gpt5 already set above)
 
     # Try the request; if the model rejects a parameter (e.g., temperature),
     # attempt a conservative retry (temperature=1) for GPT-5 models.
@@ -95,7 +140,7 @@ def chat_completions(messages=None, model=None, max_tokens=None, temperature=Non
             # attempt progressively larger caps
             for cap in (2048, 8192, 32768):
                 try:
-                    if payload.get("model") and ("gpt-5" in payload.get("model") or str(payload.get("model")).startswith("gpt5") or str(payload.get("model")).startswith("gpt-5")):
+                    if is_gpt5_model(payload.get("model", "")):
                         payload["max_completion_tokens"] = cap
                     else:
                         payload["max_tokens"] = cap
@@ -129,7 +174,7 @@ def chat_completions(messages=None, model=None, max_tokens=None, temperature=Non
         if is_gpt5 and _truncated(response):
             for cap in (8192, 32768, 65536):
                 try:
-                    if payload.get("model") and ("gpt-5" in payload.get("model") or str(payload.get("model")).startswith("gpt5") or str(payload.get("model")).startswith("gpt-5")):
+                    if is_gpt5_model(payload.get("model", "")):
                         payload["max_completion_tokens"] = cap
                     else:
                         payload["max_tokens"] = cap
